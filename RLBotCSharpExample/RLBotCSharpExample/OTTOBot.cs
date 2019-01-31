@@ -2,6 +2,7 @@
 using RLBotDotNet;
 using rlbot.flat;
 using System.Collections.Generic;
+using System.Diagnostics;
 
 namespace OTTOBot
 {
@@ -11,12 +12,15 @@ namespace OTTOBot
         // We want the constructor for ExampleBot to extend from Bot, but we don't want to add anything to it.
         public OTTOBot(string botName, int botTeam, int botIndex) : base(botName, botTeam, botIndex) { }
         float alpha = 0;
-
+        Stopwatch sw;
+        double deltaTime = 0;
         public struct OTTOBotProperties
         {
             public string mode;
             public string location;
             public float distanceToBall;
+            public float distanceToOwnGoal;
+            public float distanceToOppGoal;
             public double angleToTarget;
             public int boost;
             public double pitch;
@@ -38,6 +42,18 @@ namespace OTTOBot
             public List<Vector3> boost;
         }
 
+        public struct OppenentProperties
+        {
+            public float distanceToBall;
+            public int boost;
+            public double pitch;
+            public double roll;
+            public double yaw;
+            public Vector3 pos;
+            public Vector3 velocity;
+            public Vector3 forward;
+        }
+
         public struct BezierCurve
         {
             public Vector3 p1;
@@ -54,12 +70,15 @@ namespace OTTOBot
 
         OTTOBotProperties ottoBot;
         FieldProperties field;
+        OppenentProperties opponent;
         BezierCurve bezierCurve;
         Controller controller;
         PlayerInfo playerInfo;
-
+        
         public override Controller GetOutput(GameTickPacket gameTickPacket)
         {
+            sw = new Stopwatch();
+            sw.Start();
             // This controller object will be returned at the end of the method.
             // This controller will contain all the inputs that we want the bot to perform.
             controller = new Controller();
@@ -71,9 +90,9 @@ namespace OTTOBot
             {
                 playerInfo = gameTickPacket.Players(this.index).Value;
                 BallInfo ballInfo = gameTickPacket.Ball.Value;
-
-                field.ballVelocity = new Vector3(ballInfo.Physics.Value.Velocity.Value.X, ballInfo.Physics.Value.Velocity.Value.Y, ballInfo.Physics.Value.Velocity.Value.Z);
-                field.ballPos = new Vector3(gameTickPacket.Ball.Value.Physics.Value.Location.Value.X, gameTickPacket.Ball.Value.Physics.Value.Location.Value.Y, gameTickPacket.Ball.Value.Physics.Value.Location.Value.Z);
+                BallPrediction prediction = GetBallPrediction();
+                field.ballVelocity = new Vector3(ballInfo.Physics.Value.Velocity.Value);
+                field.ballPos = new Vector3(gameTickPacket.Ball.Value.Physics.Value.Location.Value);
                 field.ownGoal = team == 0 ? new Vector3(0, -5420, 0) : new Vector3(0, 5420, 0);
                 field.oppGoal = team == 0 ? new Vector3(0, 5420, 0) : new Vector3(0, -5420, 0);
                 field.boost = new List<Vector3>();
@@ -84,16 +103,21 @@ namespace OTTOBot
                 field.boost.Add(new Vector3(-3072.0f, 4096.0f, 0));
                 field.boost.Add(new Vector3(-3072.0f, 4096.0f, 0));
 
-                ottoBot.pos = new Vector3(gameTickPacket.Players(this.index).Value.Physics.Value.Location.Value.X, gameTickPacket.Players(this.index).Value.Physics.Value.Location.Value.Y, gameTickPacket.Players(this.index).Value.Physics.Value.Location.Value.Z);
+                ottoBot.pos = new Vector3(gameTickPacket.Players(this.index).Value.Physics.Value.Location.Value);
                 ottoBot.boost = gameTickPacket.Players(this.index).Value.Boost;
                 ottoBot.distanceToBall = field.ballPos.Magnitude(ottoBot.pos);
+                ottoBot.distanceToOwnGoal = field.ownGoal.Magnitude(ottoBot.pos);
+                ottoBot.distanceToOppGoal = field.oppGoal.Magnitude(ottoBot.pos);
                 ottoBot.pitch = gameTickPacket.Players(this.index).Value.Physics.Value.Rotation.Value.Pitch;
                 ottoBot.yaw = gameTickPacket.Players(this.index).Value.Physics.Value.Rotation.Value.Yaw;
                 ottoBot.roll = gameTickPacket.Players(this.index).Value.Physics.Value.Rotation.Value.Roll;
-                ottoBot.velocity = new Vector3(playerInfo.Physics.Value.Velocity.Value.X, playerInfo.Physics.Value.Velocity.Value.Y, playerInfo.Physics.Value.Velocity.Value.Z);
+                ottoBot.velocity = new Vector3(playerInfo.Physics.Value.Velocity.Value);
                 ottoBot.forward = new Vector3((float)Math.Cos(ottoBot.yaw), (float)Math.Sin(ottoBot.yaw), 0);
                 ottoBot.closestBoost = ClosestBoost();
+
                 
+                //opponent.pos = new Vector3(gameTickPacket.Players(this.index == 0 ? 1 : 0).Value.Physics.Value.Location.Value);
+
                 SetMode();
                 SetLocation();
 
@@ -108,6 +132,9 @@ namespace OTTOBot
                     case "Get Boost":
                         GetBoost();
                         break;
+                    case "KickOff":
+                        KickOff();
+                        break;
                     default:
                         Console.WriteLine("No Mode Set!");
                         break;
@@ -121,12 +148,17 @@ namespace OTTOBot
                 Console.WriteLine(e.Message);
                 Console.WriteLine(e.StackTrace);
             }
-
+            sw.Stop();
+            deltaTime = sw.ElapsedTicks;
             return controller;
         }
 
+        
+        double time = 0;
+        
         private void UpdateOttoBot()
         {
+            
             //calculate bot target
             ottoBot.target = bezierCurve.GetPoint(alpha);
 
@@ -155,12 +187,37 @@ namespace OTTOBot
             else
                 controller.Throttle = 1;
 
+            if (ottoBot.distanceToBall < 700)
+            {
+                controller.Pitch = -1;
+
+                if (time == 0)
+                {
+                    controller.Jump = true;
+                }
+                else if (time > 0 && time < 5000)
+                {
+                    controller.Jump = false;
+                }
+                else if (time > 5000)
+                {
+                    controller.Jump = true;
+                    time = 0;
+                }
+                time += deltaTime;
+            }
+            else
+            {
+                time = 0;
+            }
+
+
             //boost
-            if (field.ballPos.x == 0 && field.ballPos.y == 0 && field.ballVelocity.x == 0 && field.ballVelocity.y == 0)
+            if (ottoBot.mode == "KickOff")
                 controller.Boost = true;
             else if (field.ballPos.Magnitude(ottoBot.pos) > 2000 && ottoBot.mode == "Attack")
                 controller.Boost = true;
-            else if (ottoBot.mode == "Defend")
+            else if (ottoBot.mode == "Defend" && ottoBot.distanceToOwnGoal < 750)
                 controller.Boost = true;
             else
                 controller.Boost = false;
@@ -168,19 +225,24 @@ namespace OTTOBot
 
         //identify if the bot needs to attack defend etc..
         private void SetMode()
-        {
-            //if bot is farther away from the oppnent goal then the ball is attack otherwise defend
-            if (ottoBot.pos.Magnitude(field.oppGoal) > field.ballPos.Magnitude(field.oppGoal))
+        {            
+            if(ottoBot.boost < 5)
+            {
+                ottoBot.mode = "Get Boost";
+            }
+
+            if(field.ballPos.x == 0 && field.ballPos.y == 0 && field.ballVelocity.x == 0 && field.ballVelocity.y == 0 && field.ballVelocity.z == 0)
+            {
+                ottoBot.mode = "KickOff";
+            }
+            else if (ottoBot.pos.Magnitude(field.oppGoal) > field.ballPos.Magnitude(field.oppGoal))
             {
                 ottoBot.mode = "Attack";
             }
-            //else if(ottoBot.boost < 5)
-            //{
-            //    ottoBot.mode = "Get Boost";
-            //}
             else
             {
-                ottoBot.mode = "Defend";
+                //ottoBot.mode = "Defend";
+                ottoBot.mode = "Attack";
             }
         }
 
@@ -214,10 +276,10 @@ namespace OTTOBot
             else if (bezierCurve.cp.x < -4096)
                 bezierCurve.cp.x = -4096;
 
-            if (bezierCurve.cp.x > 5120)
-                bezierCurve.cp.x = 5120;
-            else if (bezierCurve.cp.x < -5120)
-                bezierCurve.cp.x = -5120;
+            if (bezierCurve.cp.y > 5120)
+                bezierCurve.cp.y = 5120;
+            else if (bezierCurve.cp.y < -5120)
+                bezierCurve.cp.y = -5120;
 
             if(ottoBot.location == "Goal")
             {
@@ -237,7 +299,18 @@ namespace OTTOBot
                 (bezierCurve.p1.x + bezierCurve.p2.x) / 2,
                 (bezierCurve.p1.y + bezierCurve.p2.y) / 2,
                 (bezierCurve.p1.z + bezierCurve.p2.z) / 2);
+        }
 
+        private void KickOff()
+        {
+            Attack();
+            //bezierCurve.p1 = ottoBot.pos;
+            //bezierCurve.p2 = field.ballPos;
+
+            //bezierCurve.cp = new Vector3(
+            //    (bezierCurve.p1.x + bezierCurve.p2.x) / 2,
+            //    (bezierCurve.p1.y + bezierCurve.p2.y) / 2,
+            //    (bezierCurve.p1.z + bezierCurve.p2.z) / 2);
         }
 
         private void GetBoost()
@@ -356,6 +429,14 @@ public class Vector3
     {
         this.x = x;
         this.y = y;
+        this.z = z;
+    }
+
+    public Vector3(rlbot.flat.Vector3 v3)
+    {
+        this.x = v3.X;
+        this.y = v3.Y;
+        this.z = v3.Z;
     }
 
     public Vector3 Normalize(Vector3 destination)
